@@ -6,6 +6,10 @@ Wraps **[dxflib](https://qcad.org/en/dxflib-downloads)** by RibbonSoft / QCAD (G
 
 ---
 
+![preview](example-dxftosvg/preview.png)
+
+---
+
 ## Supported entities
 
 | DXF entity | Output |
