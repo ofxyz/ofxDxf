@@ -20,15 +20,15 @@ static constexpr float DEG2RAD = float(M_PI) / 180.f;
 static void appendBulgeArc(
     const glm::vec2& p1,
     const glm::vec2& p2,
-    double           bulge,
-    int              arcSegments,
-    ofPolyline&      out)
+    double bulge,
+    int arcSegments,
+    ofPolyline& out)
 {
-    double theta  = 4.0 * std::atan(bulge);           // total arc angle (signed)
+    double theta = 4.0 * std::abs(std::atan(bulge));           // total arc angle (unsigned)
     double d      = glm::distance(p1, p2);
     if (d < 1e-10) return;
 
-    double r      = std::abs(d / (2.0 * std::sin(theta / 2.0)));
+    double r      = d / (2.0 * std::sin(theta * 0.5));
 
     // Midpoint of chord
     glm::vec2 mid = (p1 + p2) * 0.5f;
@@ -39,32 +39,30 @@ static void appendBulgeArc(
     perp = glm::normalize(perp);
 
     // Distance from midpoint to centre
-    double d_to_center = std::sqrt(r * r - (d / 2.0) * (d / 2.0));
+    double d_to_center = std::sqrt(r * r - (d * 0.5) * (d * 0.5));
 
     // Centre is on the left (CCW) or right (CW) side of the chord
-    glm::vec2 center;
-    if (bulge > 0) {
-        center = mid - glm::vec2(perp * float(d_to_center));
-    } else {
-        center = mid + glm::vec2(perp * float(d_to_center));
-    }
+    float sign = (bulge > 0.0 ? 1.0 : -1.0);
+    glm::vec2 center = mid + perp * sign * float(d_to_center);
 
     float startAngle = std::atan2(p1.y - center.y, p1.x - center.x);
     float endAngle   = std::atan2(p2.y - center.y, p2.x - center.x);
 
     // Ensure we travel in the correct direction
-    if (bulge > 0) {
+    if (sign > 0) {
         // CCW: end must be > start (modulo 2π)
-        while (endAngle < startAngle) endAngle += float(TWO_PI);
-    } else {
+        if (endAngle <= startAngle) endAngle += float(TWO_PI);
+    }
+    else {
         // CW: end must be < start
-        while (endAngle > startAngle) endAngle -= float(TWO_PI);
+        if (endAngle >= startAngle) endAngle -= float(TWO_PI);
     }
 
-    int segs = std::max(4, arcSegments);
+    int segs = std::max(4, int(std::ceil(theta / TWO_PI * arcSegments)));
+    float discretAngle = (endAngle - startAngle) / float(segs);
+
     for (int i = 1; i <= segs; ++i) {
-        float t   = float(i) / float(segs);
-        float ang = startAngle + t * (endAngle - startAngle);
+        float ang = startAngle + discretAngle * float(i);
         out.addVertex(glm::vec3(
             center.x + float(r) * std::cos(ang),
             center.y + float(r) * std::sin(ang),
