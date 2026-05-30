@@ -76,7 +76,11 @@ void ofApp::drawEntity(const DxfEntity& entity, const ofColor& color) {
         return;
     }
 
-    entity.draw(m_zoom);
+    DxfViewContext view;
+    view.center    = m_viewCenter;
+    view.viewportW = float(ofGetWidth());
+    view.viewportH = float(ofGetHeight());
+    entity.draw(m_zoom, -1, &view);
 }
 
 void ofApp::drawUI() {
@@ -173,7 +177,7 @@ void ofApp::applyViewTransform() const {
     const float vpW = float(ofGetWidth());
     const float vpH = float(ofGetHeight());
     ofTranslate(vpW * 0.5f, vpH * 0.5f);
-    ofScale(m_zoom, m_zoom);
+    ofScale(m_zoom, -m_zoom); // DXF is Y-up; screen is Y-down
     ofTranslate(-m_viewCenter.x, -m_viewCenter.y);
 }
 
@@ -215,8 +219,8 @@ void ofApp::zoomAt(const glm::vec2& screenMouse, float factor) {
     const float newZoom = std::clamp(oldZoom * factor, kMinZoom, kMaxZoom);
     if (newZoom == oldZoom) return;
 
-    const glm::vec2 worldUnderMouse = m_viewCenter + offset / oldZoom;
-    m_viewCenter = worldUnderMouse - offset / newZoom;
+    const glm::vec2 worldUnderMouse = m_viewCenter + glm::vec2(offset.x, -offset.y) / oldZoom;
+    m_viewCenter = worldUnderMouse - glm::vec2(offset.x, -offset.y) / newZoom;
     m_zoom = newZoom;
 }
 
@@ -305,7 +309,7 @@ void ofApp::mouseReleased(ofMouseEventArgs& e) {
 void ofApp::mouseDragged(ofMouseEventArgs& e) {
     if (!m_isPanning) return;
     const glm::vec2 delta(e.x - m_dragStartMouse.x, e.y - m_dragStartMouse.y);
-    m_viewCenter = m_viewCenterStart - delta / m_zoom;
+    m_viewCenter = m_viewCenterStart - glm::vec2(delta.x, -delta.y) / m_zoom;
 }
 
 void ofApp::dragEvent(ofDragInfo info) {

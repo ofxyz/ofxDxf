@@ -72,6 +72,7 @@ private:
 
     // ── Helpers ──────────────────────────────────────────────────────────────
     LayerDisplay& layerDisplay(const std::string& name);
+    float previewLineWidthPx(const LayerDisplay& ld) const;
 
     // ── Data ─────────────────────────────────────────────────────────────────
     DxfDocument  m_doc;
@@ -92,6 +93,7 @@ private:
     glm::vec2 m_viewCenterStart;
     glm::vec2 m_dragStartMouse;
     bool      m_showGrid  = true;
+    bool      m_previewExportStroke = false;  // WYSIWYG export stroke in viewport
 
     // ── Export settings ──────────────────────────────────────────────────────
     char   m_outPathBuf[512] = "output.svg";

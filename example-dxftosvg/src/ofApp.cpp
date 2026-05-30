@@ -88,7 +88,7 @@ void ofApp::drawScene() {
             int(ld.color[0] * 255),
             int(ld.color[1] * 255),
             int(ld.color[2] * 255));
-        ofSetLineWidth(std::max(0.5f, ld.strokeWidth * m_zoom));
+        ofSetLineWidth(previewLineWidthPx(ld));
 
         for (auto& e : layer.entities)
             drawEntity(e);
@@ -115,7 +115,11 @@ void ofApp::drawEntity(const DxfEntity& entity) {
         return;
     }
 
-    entity.draw(m_zoom);
+    DxfViewContext view;
+    view.center    = m_viewCenter;
+    view.viewportW = viewportW();
+    view.viewportH = float(ofGetHeight());
+    entity.draw(m_zoom, -1, &view);
 }
 
 void ofApp::clampZoom() {
@@ -128,7 +132,7 @@ void ofApp::applyViewTransform() const {
     const float vpW = viewportW();
     const float vpH = float(ofGetHeight());
     ofTranslate(vpW * 0.5f, vpH * 0.5f);
-    ofScale(m_zoom, m_zoom);
+    ofScale(m_zoom, -m_zoom); // DXF is Y-up; screen is Y-down
     ofTranslate(-m_viewCenter.x, -m_viewCenter.y);
 }
 
@@ -170,8 +174,8 @@ void ofApp::zoomAt(const glm::vec2& viewMouse, float factor) {
     const float newZoom = std::clamp(oldZoom * factor, kMinZoom, kMaxZoom);
     if (newZoom == oldZoom) return;
 
-    const glm::vec2 worldUnderMouse = m_viewCenter + offset / oldZoom;
-    m_viewCenter = worldUnderMouse - offset / newZoom;
+    const glm::vec2 worldUnderMouse = m_viewCenter + glm::vec2(offset.x, -offset.y) / oldZoom;
+    m_viewCenter = worldUnderMouse - glm::vec2(offset.x, -offset.y) / newZoom;
     m_zoom = newZoom;
 }
 
@@ -367,10 +371,12 @@ void ofApp::drawLayerSection() {
         if (!ld.visible) ImGui::TextDisabled("%s", label.c_str());
         else             ImGui::TextUnformatted(label.c_str());
 
-        ImGui::SliderFloat("##sw", &ld.strokeWidth, 0.05f, 3.f, "stroke %.2f mm");
+        ImGui::SliderFloat("##sw", &ld.strokeWidth, 0.05f, 3.f, "export %.2f mm");
 
         ImGui::PopID();
     }
+
+    ImGui::TextDisabled("Preview: 1 px hairline (export stroke applies on save)");
 
     ImGui::PopID();
 }
@@ -450,6 +456,10 @@ void ofApp::drawAppearanceSection() {
 
     if (!m_doc.empty())
         ImGui::TextDisabled("Zoom %.2fx", m_zoom);
+
+    ImGui::Checkbox("Preview export stroke width", &m_previewExportStroke);
+    if (m_previewExportStroke)
+        ImGui::TextDisabled("Clamped to 8 px max — zoom in for WYSIWYG");
 
     ImGui::Spacing();
     ImGui::SeparatorText("Appearance");
@@ -698,6 +708,17 @@ LayerDisplay& ofApp::layerDisplay(const std::string& name) {
     return m_layerDisplay[name];
 }
 
+float ofApp::previewLineWidthPx(const LayerDisplay& ld) const {
+    // ofSetLineWidth is screen pixels and is NOT scaled by ofScale(m_zoom).
+    // Multiplying export mm by zoom made strokes explode when zoomed in and
+    // broke polyline rendering (thick GL lines + many segments).
+    if (m_previewExportStroke) {
+        constexpr float kMaxPreviewStrokePx = 8.f;
+        return std::clamp(ld.strokeWidth * m_zoom, 0.5f, kMaxPreviewStrokePx);
+    }
+    return 1.f;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Input
 // ─────────────────────────────────────────────────────────────────────────────
@@ -739,7 +760,7 @@ void ofApp::mouseReleased(ofMouseEventArgs& e) {
 void ofApp::mouseDragged(ofMouseEventArgs& e) {
     if (!m_isPanning) return;
     const glm::vec2 delta(e.x - m_dragStartMouse.x, e.y - m_dragStartMouse.y);
-    m_viewCenter = m_viewCenterStart - delta / m_zoom;
+    m_viewCenter = m_viewCenterStart - glm::vec2(delta.x, -delta.y) / m_zoom;
 }
 
 void ofApp::dragEvent(ofDragInfo info) {
