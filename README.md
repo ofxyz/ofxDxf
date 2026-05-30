@@ -1,30 +1,15 @@
 # ofxDxf
 
-DXF file loader for [openFrameworks](https://openframeworks.cc). Parses geometry into `ofPolyline` entities grouped by layer, ready for rendering, plotting, or export.
+Load, display, and save 2D DXF geometry for openFrameworks plotting and conversion workflows.
 
-Wraps **[dxflib](https://qcad.org/en/dxflib-downloads)** by RibbonSoft / QCAD (GPLv2+), vendored under `libs/dxflib/src/`.
+Built on [dxflib](libs/dxflib). Geometry is stored as **`ofPath`** commands where possible (lines, arcs, circles, bulge arcs stay exact). Splines and ellipses keep DXF metadata for lossless re-export; display tessellation follows **`ofGetStyle()`** and view zoom.
 
----
+## Examples
 
-![preview](example-dxftosvg/preview.png)
-
----
-
-## Supported entities
-
-| DXF entity | Output |
-|---|---|
-| `LINE` | 2-point polyline |
-| `ARC` | Discretized polyline + raw `DxfArcInfo` (center, radius, angles) |
-| `CIRCLE` | Closed polyline + raw `DxfArcInfo` |
-| `LWPOLYLINE` / `POLYLINE` | Polyline with **bulge arcs** correctly converted to curve segments |
-| `ELLIPSE` | Discretized polyline |
-| `SPLINE` | De Boor evaluated B-spline (falls back to fit-points if present) |
-| `POINT` | Single-vertex polyline |
-
-Layers are preserved. Each entity carries its source layer name.
-
----
+| Example | Description |
+|---------|-------------|
+| `example-simple` | Minimal DXF viewer (drag & drop) |
+| `example-dxftosvg` | DXF ↔ SVG converter with layer UI and export |
 
 ## Basic usage
 
@@ -32,65 +17,98 @@ Layers are preserved. Each entity carries its source layer name.
 #include "ofxDxf.h"
 
 DxfDocument doc = ofxDxf::load("drawing.dxf");
+if (doc.empty()) return;
 
 for (auto& layer : doc.layers) {
-    ofSetColor(255);
     for (auto& entity : layer.entities) {
-        entity.polyline.draw();
+        entity.draw(zoom);           // preview — zoom-adaptive tessellation
+        // entity.exportPath();      // plot / SVG export — quality-first
     }
 }
+
+ofxDxf::save(doc, "out.dxf");       // R2000 ASCII DXF
+doc.flipY();                         // DXF Y-up ↔ screen Y-down
 ```
 
-### Coordinate system
+## Supported on load
 
-DXF files use a Y-up coordinate system. Call `flipY()` before rendering or exporting to SVG/screen (Y-down):
+| Feature | Status | Notes |
+|---------|--------|-------|
+| **LINE** | ✅ | Native `ofPath` |
+| **ARC** | ✅ | Exact arc commands + `DxfArcInfo` |
+| **CIRCLE** | ✅ | Exact arc / circle + `DxfArcInfo` |
+| **LWPOLYLINE** | ✅ | Lines + **bulge** arcs |
+| **POLYLINE** | ✅ | Legacy polyline + vertices |
+| **ELLIPSE** | ✅ | Metadata preserved; display via tessellation |
+| **SPLINE** | ✅ | NURBS metadata preserved; display via tessellation |
+| **POINT** | ✅ | Loaded; not drawn by default |
+| **INSERT / BLOCK** | ✅ | Blocks collected; INSERT expands to model space (scale, rotation, arrays) |
+| **Layers** | ✅ | LAYER table + entity layer attribute |
+| **Colors** | ✅ | ACI palette + 24-bit `color24` |
+| **Empty layers** | ✅ | Layers from table appear even with 0 entities |
 
-```cpp
-DxfDocument doc = ofxDxf::load("drawing.dxf");
-doc.flipY();  // converts to Y-down; updates bounds and arc angles
-```
+### Export / save (`ofxDxf::save`)
 
-### Arc metadata
+| Entity | Write format |
+|--------|----------------|
+| Line, arc, circle | Native DXF entities |
+| Ellipse, spline | Native DXF when metadata present |
+| Other / fallback | **LWPOLYLINE** at export quality (`exportPath()`) |
 
-For toolpath generation (G2/G3 arcs in G-code), arcs and circles expose their raw geometry:
+INSERT/BLOCK structure is **not** recreated on save — output is flat geometry.
 
-```cpp
-for (auto& entity : layer.entities) {
-    if (entity.arcInfo) {
-        auto& ai = *entity.arcInfo;
-        // ai.center, ai.radius, ai.startAngle, ai.endAngle (degrees), ai.isCCW
-    }
-}
-```
+## Not supported (ignored)
 
-### Convenience accessors
+These DXF entities are parsed by dxflib but **not** converted to `DxfEntity` geometry:
 
-```cpp
-doc.getAllEntities();                    // flat list across all layers
-doc.getEntitiesOnLayer("cutlines");     // entities on a named layer
-doc.getAllPolylines();                   // all discretized polylines
-doc.getLayerNames();                    // ["0", "cutlines", ...]
-doc.bounds;                             // ofRectangle covering all geometry
-```
+| Type | Common in |
+|------|-----------|
+| **TEXT / MTEXT** | Labels, part numbers |
+| **DIMENSION** (+ variants) | AutoCAD dimensions |
+| **HATCH** | Filled regions, sheet outlines |
+| **XLINE / RAY** | Construction geometry |
+| **3DFACE / SOLID / TRACE** | Filled triangles / quads |
+| **ATTRIB** | Block attribute text |
+| **IMAGE** | Raster references |
+| **LEADER** | Annotation leaders |
+| **Paper space layouts** | Layout tabs (model space only) |
+| **Linetypes / lineweights** | Stored in DXF; not applied on draw |
+| **Block forward references** | INSERT before block definition may fail |
 
----
+If your file looks incomplete, check the console for `INSERT references unknown block` warnings.
 
-## Examples
+## Geometry API
 
-| Example | Description |
-|---|---|
-| `example-simple` | Drag-and-drop viewer with per-layer colour and visibility |
-| `example-dxftosvg` | Load a DXF, preview with ofxImGui controls, export to SVG via ofxSvg |
+| Method | Use |
+|--------|-----|
+| `entity.path` | Exact stored geometry |
+| `entity.exportPath()` | **Export / plot** — exact paths; adaptive tessellation for spline/ellipse only |
+| `entity.resolvedPath()` | **Display** — uses `ofGetStyle()` segment count |
+| `entity.getOutline()` | Tessellated polylines |
+| `entity.draw(zoom)` | Preview with zoom-adaptive arcs |
 
----
+Tessellation resolution is **not** stored on the document — it comes from render context (`ofGetStyle()`, zoom), except export which uses world-space quality automatically.
+
+## Quick wins (roadmap)
+
+Low-effort improvements that would help most laser/CNC/SVG workflows:
+
+1. **Skip logging** — count and log ignored entity types per file (`HATCH`, `TEXT`, …) so users know why geometry is missing. *(~1 hour)*
+2. **SOLID / TRACE / 3DFACE** — emit as closed polylines (≤4 vertices). Many flat parts use these for triangles. *(~2 hours)*
+3. **HATCH boundaries** — use dxflib hatch loops as polylines (ignore fill pattern). Common on sheet-metal and nesting DXFs. *(~4 hours)*
+4. **Block forward references** — second pass or deferred INSERT expansion when block is defined later in the file. *(~2 hours)*
+5. **DIMENSION decomposition** — explode dimension primitives to lines/arcs/text (or lines only). *(~1 day)*
+6. **TEXT as placeholder** — bounding box rectangle or `ofTrueTypeFont` outline for labels (optional, heavier). *(~1–2 days)*
+
+Higher effort: paper space, linetype pattern rendering, full HATCH fill, write INSERT/BLOCK on save.
 
 ## Dependencies
 
-- **ofxDxf** itself has no OF addon dependencies.
-- `example-dxftosvg` requires `ofxImGui` and `ofxSvg`.
+- openFrameworks (`ofPath`, `ofPolyline`, …)
+- dxflib (included under `libs/dxflib`)
 
----
+Optional in examples: `ofxSvg`, `ofxImGui`, `ofxImGuiStyle`.
 
-## dxflib license
+## License
 
-dxflib is © RibbonSoft GmbH and licensed under **GPLv2 or later**. Source files are in `libs/dxflib/src/`. See [qcad.org](https://qcad.org/en/dxflib-downloads) for the standalone release.
+See addon and dxflib license files.

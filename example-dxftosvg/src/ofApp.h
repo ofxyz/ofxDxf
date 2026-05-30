@@ -2,6 +2,9 @@
 
 #include "ofMain.h"
 #include "ofxImGui.h"
+#include "ImTheme.h"
+#include "ImThemeRegistry.h"
+#include "ImFonts.h"
 #include "ofxDxf.h"
 #include "ofxSvg.h"
 #include <string>
@@ -24,6 +27,7 @@ class ofApp : public ofBaseApp {
 public:
     void setup()  override;
     void draw()   override;
+    void windowResized(int w, int h) override;
 
     void keyPressed(int key) override;
     void mouseScrolled(ofMouseEventArgs& e) override;
@@ -38,16 +42,29 @@ private:
     void loadSvg(const std::string& path);
     void onDocLoaded();
     void fitView();
+    ofRectangle fitBounds() const;
+    void applyViewTransform() const;
+    void zoomAt(const glm::vec2& viewMouse, float factor);
 
     // ── Drawing ──────────────────────────────────────────────────────────────
     void drawScene();
     void drawGrid();
+    void drawEntity(const DxfEntity& entity);
+    void clampZoom();
 
     // ── ImGui panels ─────────────────────────────────────────────────────────
     void drawSidebar();
     void drawFileSection();
     void drawLayerSection();
     void drawExportSection();
+    void drawAppearanceSection();
+    void drawViewportOverlay();
+
+    void setupImGui();
+    float sidebarW() const { return kSidebarBaseW * m_uiScale; }
+    float viewportW() const { return float(ofGetWidth()) - sidebarW(); }
+
+    bool isInViewport(float screenX) const { return screenX >= sidebarW(); }
 
     // ── Export ───────────────────────────────────────────────────────────────
     bool exportSvg(const std::string& outPath);
@@ -64,13 +81,16 @@ private:
     std::map<std::string, LayerDisplay> m_layerDisplay;
 
     // ── View ─────────────────────────────────────────────────────────────────
-    static constexpr float SIDEBAR_W = 280.f;
+    static constexpr float kSidebarBaseW = 280.f;
+    static constexpr float kMinZoom      = 1e-4f;
+    static constexpr float kMaxZoom      = 1e6f;
 
-    glm::vec2 m_pan       = { 0, 0 };
-    float     m_zoom      = 1.f;
-    bool      m_isPanning = false;
-    glm::vec2 m_panStart;
-    glm::vec2 m_panStartMouse;
+    glm::vec2 m_viewCenter = { 0, 0 };
+    float     m_zoom       = 1.f;
+    float     m_uiScale      = 1.f;
+    bool      m_isPanning    = false;
+    glm::vec2 m_viewCenterStart;
+    glm::vec2 m_dragStartMouse;
     bool      m_showGrid  = true;
 
     // ── Export settings ──────────────────────────────────────────────────────

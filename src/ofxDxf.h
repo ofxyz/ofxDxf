@@ -7,23 +7,44 @@
 #include <map>
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DxfArcInfo
-//   Raw arc parameters preserved alongside the discretized polyline.
-//   Lets you generate true G2/G3 arc moves rather than line segments.
+// DxfArcInfo — exact circular arc / circle parameters (DXF ARC / CIRCLE).
 // ─────────────────────────────────────────────────────────────────────────────
 struct DxfArcInfo {
     glm::vec2 center;
     float     radius     = 0;
     float     startAngle = 0;   // degrees, CCW from +X
     float     endAngle   = 0;   // degrees, CCW from +X
-    bool      isCCW      = true; // true = counter-clockwise
+    bool      isCCW      = true;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DxfEntity
-//   A single drawn shape from a DXF file.
-//   polyline is always populated (discretized to line segments).
-//   arcInfo is only set for ARC and CIRCLE entities.
+// DxfEllipseInfo — exact DXF ELLIPSE parameters (may be rotated).
+// ─────────────────────────────────────────────────────────────────────────────
+struct DxfEllipseInfo {
+    glm::vec2 center;
+    glm::vec2 majorAxis;   ///< major axis vector (mx, my) from DXF
+    float     ratio = 1.f; ///< minor / major
+    double    startParam = 0;
+    double    endParam   = 0;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DxfSplineInfo — exact DXF SPLINE parameters for lossless export.
+// ─────────────────────────────────────────────────────────────────────────────
+struct DxfSplineInfo {
+    int                  degree = 3;
+    bool                 closed = false;
+    std::vector<double>  knots;
+    std::vector<glm::vec2> controlPoints;
+    std::vector<glm::vec2> fitPoints;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DxfEntity — one shape from a DXF file.
+//   Primary geometry lives in `path` (ofPath commands — arcs/circles stay exact).
+//   Optional metadata preserves types that need extra DXF fields on export.
+//   Tessellation happens only for display (getOutline / resolvedPath) or when
+//   exportPath must approximate splines/ellipses that have no exact ofPath yet.
 // ─────────────────────────────────────────────────────────────────────────────
 struct DxfEntity {
     enum class Type {
@@ -38,12 +59,29 @@ struct DxfEntity {
 
     Type        type  = Type::Line;
     std::string layer = "0";
+    ofColor     color {0, 0, 0};
 
-    /// Always populated: the entity as a discretized polyline.
-    ofPolyline  polyline;
+    /// Exact vector geometry (lines, arcs, circles, bulge arcs as arc commands).
+    ofPath      path;
 
-    /// Only set for Arc and Circle — lets you preserve the exact geometry.
-    std::optional<DxfArcInfo> arcInfo;
+    std::optional<DxfArcInfo>     arcInfo;
+    std::optional<DxfEllipseInfo> ellipseInfo;
+    std::optional<DxfSplineInfo>  splineInfo;
+
+    /// Tessellate to polylines for display. `segments <= 0` uses ofGetStyle().
+    std::vector<ofPolyline> getOutline(int segments = -1) const;
+
+    /// Display path — may tessellate splines/ellipses. `segments <= 0` uses ofGetStyle().
+    ofPath resolvedPath(int segments = -1) const;
+
+    /// Export path — exact ofPath commands when possible; splines/ellipses are
+    /// tessellated at adaptive world-space quality (not the display resolution).
+    /// Pass `segments > 0` to override the automatic count.
+    ofPath exportPath(int segments = -1) const;
+
+    /// Draw for display. Base segment count comes from ofGetStyle(); `viewZoom`
+    /// adapts arc/circle density (~1.5 px/segment). Pass `segments > 0` to override.
+    void draw(float viewZoom = 1.f, int segments = -1) const;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -51,12 +89,12 @@ struct DxfEntity {
 // ─────────────────────────────────────────────────────────────────────────────
 struct DxfLayer {
     std::string              name;
+    ofColor                  color {0, 0, 0};
     std::vector<DxfEntity>   entities;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DxfDocument
-//   Result of parsing a DXF file.
 // ─────────────────────────────────────────────────────────────────────────────
 struct DxfDocument {
     std::vector<DxfLayer>    layers;
@@ -65,49 +103,38 @@ struct DxfDocument {
 
     bool empty() const { return layers.empty(); }
 
-    /// All entities across all layers, in order.
     std::vector<const DxfEntity*> getAllEntities() const;
-
-    /// Entities on a specific layer (returns empty vector if layer not found).
     std::vector<const DxfEntity*> getEntitiesOnLayer(const std::string& layerName) const;
 
-    /// All entity polylines as a flat list (convenient for rendering/sorting).
-    std::vector<ofPolyline> getAllPolylines() const;
+    /// All entity paths (copies of exact ofPath storage).
+    std::vector<ofPath> getAllPaths() const;
 
-    /// Polylines from one layer.
-    std::vector<ofPolyline> getPolylinesOnLayer(const std::string& layerName) const;
+    std::vector<ofPath> getPathsOnLayer(const std::string& layerName) const;
 
-    /// Layer names present in the document.
+    /// Tessellated outlines for display. `segments <= 0` uses ofGetStyle().
+    std::vector<ofPolyline> getAllPolylines(int segments = -1) const;
+    std::vector<ofPolyline> getPolylinesOnLayer(const std::string& layerName,
+                                                int segments = -1) const;
+
     std::vector<std::string> getLayerNames() const;
 
-    /// Flip all vertices around the horizontal centre of the bounding box,
-    /// converting between DXF (Y-up) and SVG/screen (Y-down) coordinate systems.
-    /// Also flips arcInfo angles so arc direction remains correct.
-    /// Recomputes bounds after the transform.
     void flipY();
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ofxDxf
-//   Loads a DXF file and returns a DxfDocument.
-//
-//   Usage:
-//       DxfDocument doc = ofxDxf::load("drawing.dxf");
-//       for (auto& layer : doc.layers) { ... }
-//
-//   arcSegments controls how many line segments are used to discretize
-//   arcs, circles, ellipses, and splines.
 // ─────────────────────────────────────────────────────────────────────────────
 class ofxDxf {
 public:
-    /// Load a DXF file from disk. Path is resolved via ofToDataPath.
-    static DxfDocument load(const std::string& path, int arcSegments = 64);
+    static ofColor aciToColor(int aci);
+    static ofColor paletteColor(int index);
 
-    /// Load from an ofBuffer (e.g. a file already read into memory).
-    static DxfDocument loadBuffer(const ofBuffer& buffer, int arcSegments = 64);
+    /// Load a DXF file. Geometry stays exact in ofPath / metadata; tessellation
+    /// is chosen at draw/export time from ofGetStyle() and view zoom.
+    static DxfDocument load(const std::string& path);
+    static DxfDocument loadBuffer(const ofBuffer& buffer);
 
-    /// Save a DxfDocument to disk as an ASCII DXF (R2000 format).
-    /// Each polyline is written as a LWPOLYLINE entity on its source layer.
-    /// Returns true on success.
+    /// Save as ASCII DXF (R2000). Writes native LINE / ARC / CIRCLE / ELLIPSE /
+    /// SPLINE when metadata is available; otherwise falls back to LWPOLYLINE.
     static bool save(const DxfDocument& doc, const std::string& path);
 };
