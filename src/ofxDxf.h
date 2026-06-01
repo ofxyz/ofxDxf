@@ -73,6 +73,7 @@ struct DxfEntity {
     ofColor     color {0, 0, 0};
 
     /// Exact vector geometry (lines, arcs, circles, bulge arcs as arc commands).
+    /// Ellipse/spline curves keep `path` empty; tessellation uses metadata at draw time.
     ofPath      path;
 
     std::optional<DxfArcInfo>     arcInfo;
@@ -121,7 +122,7 @@ struct DxfDocument {
     std::vector<const DxfEntity*> getAllEntities() const;
     std::vector<const DxfEntity*> getEntitiesOnLayer(const std::string& layerName) const;
 
-    /// All entity paths (copies of exact ofPath storage).
+    /// Resolved path for every entity (tessellates ellipses/splines at default quality).
     std::vector<ofPath> getAllPaths() const;
 
     std::vector<ofPath> getPathsOnLayer(const std::string& layerName) const;
@@ -149,7 +150,10 @@ struct DxfCurvePromotionSettings {
     bool  promoteBulgeArcs             = true;
     /// Fit closed chord polylines to CIRCLE — heuristic, off by default.
     bool  promoteFacetedCircles        = false;
+    /// Fit open chord polylines to ARC — heuristic, off by default.
+    bool  promoteFacetedArcs           = false;
     int   facetedCircleMinVertices     = 16;
+    int   facetedArcMinVertices        = 8;
     float facetedCircleMaxRelativeError = 0.01f;
     float facetedCircleMaxEdgeVariance  = 0.05f;
 };

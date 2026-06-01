@@ -617,6 +617,68 @@ static ofPath pathFromArcInfo(const DxfArcInfo& ai, DxfEntity::Type type) {
     return p;
 }
 
+/// Rebuild `path` from exact ofPath commands when metadata allows (arc/circle).
+static void syncExactPath(DxfEntity& e) {
+    if (e.arcInfo)
+        e.path = pathFromArcInfo(*e.arcInfo, e.type);
+}
+
+static std::optional<DxfArcInfo> tryPromoteArcFromOpenPolyline(
+    const ofPath& path, const DxfCurvePromotionSettings& settings) {
+    if (!settings.promoteFacetedArcs) return std::nullopt;
+    if (pathHasArcCommands(path)) return std::nullopt;
+
+    bool closed = false;
+    std::vector<glm::vec2> pts;
+    for (const auto& cmd : path.getCommands()) {
+        if (cmd.type == ofPath::Command::close) {
+            closed = true;
+            break;
+        }
+        if (cmd.type == ofPath::Command::moveTo || cmd.type == ofPath::Command::lineTo)
+            pts.push_back(cmd.to);
+    }
+    if (closed || pts.size() < (size_t)settings.facetedArcMinVertices)
+        return std::nullopt;
+
+    glm::vec2 center {0, 0};
+    for (const auto& p : pts) center += p;
+    center /= float(pts.size());
+
+    float avgR = 0.f;
+    for (const auto& p : pts) avgR += glm::distance(p, center);
+    avgR /= float(pts.size());
+    if (avgR <= 1e-4f) return std::nullopt;
+
+    float maxErr = 0.f;
+    for (const auto& p : pts)
+        maxErr = std::max(maxErr, std::abs(glm::distance(p, center) - avgR));
+
+    const float relErr = maxErr / avgR;
+    if (relErr > settings.facetedCircleMaxRelativeError && maxErr > 0.1f)
+        return std::nullopt;
+
+    std::vector<float> angles;
+    angles.reserve(pts.size());
+    for (const auto& p : pts)
+        angles.push_back(std::atan2(p.y - center.y, p.x - center.x) * RAD2DEG);
+    for (size_t i = 1; i < angles.size(); ++i) {
+        while (angles[i] - angles[i - 1] > 180.f) angles[i] -= 360.f;
+        while (angles[i] - angles[i - 1] < -180.f) angles[i] += 360.f;
+    }
+
+    const float sweep = angles.back() - angles.front();
+    if (std::abs(sweep) < 5.f || std::abs(sweep) > 359.f) return std::nullopt;
+
+    DxfArcInfo ai;
+    ai.center     = center;
+    ai.radius     = avgR;
+    ai.startAngle = angles.front();
+    ai.endAngle   = angles.back();
+    ai.isCCW      = sweep > 0.f;
+    return ai;
+}
+
 static void applyPromotedCurve(DxfEntity& e, DxfEntity::Type type,
                                ofPath path, DxfArcInfo ai) {
     e.type    = type;
@@ -638,6 +700,14 @@ static DxfCurvePromotionKind promoteEntityCurvesImpl(
                     std::move(promoted->path), *promoted->arcInfo);
                 return DxfCurvePromotionKind::Circle;
             }
+        }
+    }
+
+    if (settings.promoteFacetedArcs) {
+        if (auto ai = tryPromoteArcFromOpenPolyline(e.path, settings)) {
+            applyPromotedCurve(e, DxfEntity::Type::Arc,
+                pathFromArcInfo(*ai, DxfEntity::Type::Arc), *ai);
+            return DxfCurvePromotionKind::Arc;
         }
     }
 
@@ -1219,14 +1289,15 @@ static DxfEntity makeEntityFromTraceLike(const DL_TraceData& d) {
     return makeClosedPolylineFromPoints(pts);
 }
 
-static bool appendHatchEdgeToPath(const DL_HatchEdgeData& edge, ofPath& path) {
-    if (!edge.defined && edge.type != 0) return false;
+static std::optional<DxfEntity> hatchEdgeToEntity(const DL_HatchEdgeData& edge) {
+    if (!edge.defined && edge.type != 0) return std::nullopt;
 
     switch (edge.type) {
     case 0: {
-        if (edge.vertices.size() < 2) return false;
-        if (path.getCommands().empty())
-            path.moveTo(float(edge.vertices[0][0]), float(edge.vertices[0][1]));
+        if (edge.vertices.size() < 2) return std::nullopt;
+        ofPath path;
+        initStrokePath(path);
+        path.moveTo(float(edge.vertices[0][0]), float(edge.vertices[0][1]));
         for (size_t i = 0; i + 1 < edge.vertices.size(); ++i) {
             const glm::vec2 p1(float(edge.vertices[i][0]), float(edge.vertices[i][1]));
             const glm::vec2 p2(float(edge.vertices[i + 1][0]), float(edge.vertices[i + 1][1]));
@@ -1236,49 +1307,67 @@ static bool appendHatchEdgeToPath(const DL_HatchEdgeData& edge, ofPath& path) {
             else
                 path.lineTo(p2.x, p2.y);
         }
-        return true;
+        if (edge.vertices.size() >= 3) path.close();
+        return makePolylineEntity(std::move(path));
     }
-    case 1:
-        if (path.getCommands().empty())
-            path.moveTo(float(edge.x1), float(edge.y1));
-        path.lineTo(float(edge.x2), float(edge.y2));
-        return true;
+    case 1: {
+        DxfEntity e;
+        e.type = DxfEntity::Type::Line;
+        initStrokePath(e.path);
+        e.path.moveTo(float(edge.x1), float(edge.y1));
+        e.path.lineTo(float(edge.x2), float(edge.y2));
+        return e;
+    }
     case 2: {
-        const float a1 = float(edge.angle1 * RAD2DEG);
-        const float a2 = float(edge.angle2 * RAD2DEG);
-        addDxfArcToPath(path, float(edge.cx), float(edge.cy), float(edge.radius),
-                        a1, a2, edge.ccw);
-        return true;
+        DxfEntity e;
+        initStrokePath(e.path);
+        DxfArcInfo ai;
+        ai.center     = glm::vec2(float(edge.cx), float(edge.cy));
+        ai.radius     = float(edge.radius);
+        ai.startAngle = float(edge.angle1 * RAD2DEG);
+        ai.endAngle   = float(edge.angle2 * RAD2DEG);
+        ai.isCCW      = edge.ccw;
+        e.arcInfo     = ai;
+        e.type = arcInfoIsFullCircle(ai) ? DxfEntity::Type::Circle : DxfEntity::Type::Arc;
+        syncExactPath(e);
+        return e;
     }
     case 3: {
+        DxfEntity e;
+        e.type = DxfEntity::Type::Ellipse;
+        initStrokePath(e.path);
         DxfEllipseInfo ei;
         ei.center     = glm::vec2(float(edge.cx), float(edge.cy));
         ei.majorAxis  = glm::vec2(float(edge.mx), float(edge.my));
         ei.ratio      = float(edge.ratio);
         ei.startParam = edge.angle1;
         ei.endParam   = edge.angle2;
-        ofPath ep = pathFromEllipse(ei, boundsSegmentCount());
-        if (path.getCommands().empty()) {
-            path = ep;
-            return !path.getCommands().empty();
-        }
-        for (const auto& outline : ep.getOutline()) {
-            for (const auto& v : outline.getVertices())
-                path.lineTo(v.x, v.y);
-        }
-        return true;
+        e.ellipseInfo = ei;
+        return e;
     }
-    case 4:
-        if (edge.controlPoints.size() >= 2) {
-            if (path.getCommands().empty())
-                path.moveTo(float(edge.controlPoints[0][0]), float(edge.controlPoints[0][1]));
-            for (size_t i = 1; i < edge.controlPoints.size(); ++i)
-                path.lineTo(float(edge.controlPoints[i][0]), float(edge.controlPoints[i][1]));
-            return true;
+    case 4: {
+        if (edge.controlPoints.empty() && edge.fitPoints.empty()) return std::nullopt;
+        DxfEntity e;
+        e.type = DxfEntity::Type::Spline;
+        initStrokePath(e.path);
+        DxfSplineInfo sp;
+        sp.degree = int(edge.degree);
+        sp.closed = edge.periodic;
+        sp.knots  = edge.knots;
+        for (const auto& cp : edge.controlPoints) {
+            if (cp.size() >= 2)
+                sp.controlPoints.emplace_back(float(cp[0]), float(cp[1]));
         }
-        return false;
+        for (const auto& fp : edge.fitPoints) {
+            if (fp.size() >= 2)
+                sp.fitPoints.emplace_back(float(fp[0]), float(fp[1]));
+        }
+        if (sp.controlPoints.empty() && sp.fitPoints.empty()) return std::nullopt;
+        e.splineInfo = std::move(sp);
+        return e;
+    }
     default:
-        return false;
+        return std::nullopt;
     }
 }
 
@@ -1466,8 +1555,7 @@ public:
         ai.isCCW      = true;
         e.arcInfo     = ai;
 
-        addDxfArcToPath(e.path, ai.center.x, ai.center.y, ai.radius,
-                        ai.startAngle, ai.endAngle, ai.isCCW);
+        syncExactPath(e);
         pushEntity(std::move(e));
     }
 
@@ -1484,7 +1572,7 @@ public:
         ai.isCCW      = true;
         e.arcInfo     = ai;
 
-        e.path.circle(float(d.cx), float(d.cy), float(d.radius));
+        syncExactPath(e);
         pushEntity(std::move(e));
     }
 
@@ -1610,21 +1698,17 @@ public:
     void addHatch(const DL_HatchData& d) override {
         (void)d;
         m_hatchActive = true;
-        m_hatchLoopPaths.clear();
+        m_hatchEntities.clear();
     }
 
     void addHatchLoop(const DL_HatchLoopData& d) override {
         (void)d;
-        m_hatchLoopPaths.emplace_back();
-        initStrokePath(m_hatchLoopPaths.back());
     }
 
     void addHatchEdge(const DL_HatchEdgeData& d) override {
-        if (m_hatchLoopPaths.empty()) {
-            m_hatchLoopPaths.emplace_back();
-            initStrokePath(m_hatchLoopPaths.back());
-        }
-        if (!appendHatchEdgeToPath(d, m_hatchLoopPaths.back()))
+        if (auto e = hatchEdgeToEntity(d))
+            m_hatchEntities.push_back(std::move(*e));
+        else
             noteSkipped("HATCH_EDGE");
     }
 
@@ -1700,7 +1784,7 @@ private:
     bool                       m_splinePending   = false;
 
     bool                       m_hatchActive = false;
-    std::vector<ofPath>        m_hatchLoopPaths;
+    std::vector<DxfEntity>     m_hatchEntities;
 
     struct PendingInsert {
         DL_InsertData data;
@@ -1754,12 +1838,9 @@ private:
     }
 
     void flushHatchEntities() {
-        for (auto& loopPath : m_hatchLoopPaths) {
-            if (loopPath.getCommands().size() < 2) continue;
-            loopPath.close();
-            pushEntity(makePolylineEntity(std::move(loopPath)));
-        }
-        m_hatchLoopPaths.clear();
+        for (auto& e : m_hatchEntities)
+            pushEntity(std::move(e));
+        m_hatchEntities.clear();
     }
 
     void expandInsert(const DL_InsertData& d, int depth) {
@@ -1888,7 +1969,7 @@ std::vector<ofPath> DxfDocument::getAllPaths() const {
     std::vector<ofPath> out;
     for (auto& layer : layers)
         for (auto& e : layer.entities)
-            out.push_back(e.path);
+            out.push_back(e.resolvedPath());
     return out;
 }
 
@@ -1897,7 +1978,7 @@ std::vector<ofPath> DxfDocument::getPathsOnLayer(const std::string& name) const 
     for (auto& layer : layers)
         if (layer.name == name)
             for (auto& e : layer.entities)
-                out.push_back(e.path);
+                out.push_back(e.resolvedPath());
     return out;
 }
 

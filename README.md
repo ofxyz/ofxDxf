@@ -2,7 +2,12 @@
 
 Load, display, and save 2D DXF geometry for openFrameworks plotting and conversion workflows.
 
-Built on [dxflib](libs/dxflib). Geometry is stored as **`ofPath`** commands where possible (lines, arcs, circles, bulge arcs stay exact). Native **CIRCLE** / **ARC** entities also store **`DxfArcInfo`** for lossless export. Splines and ellipses keep DXF metadata for re-export; display tessellation follows **`ofGetStyle()`** and view zoom.
+Built on [dxflib](libs/dxflib). Geometry uses a **dual storage model**:
+
+- **`ofPath`** — exact commands where openFrameworks supports them: lines, circular arcs, circles, bulge arcs (`path.arc` / `path.circle`).
+- **Metadata** — `DxfArcInfo`, `DxfEllipseInfo`, `DxfSplineInfo` when DXF needs extra fields. Ellipse/spline entities keep `path` empty; preview tessellates from metadata at draw time.
+
+Native **CIRCLE** / **ARC** store both metadata and a synced exact `ofPath`. Display tessellation follows **`ofGetStyle()`** and view zoom.
 
 **Load is lossless and non-destructive** — no heuristic curve fitting runs automatically. Optional **`promoteCurves()`** can recover bulge arcs or (if you opt in) faceted circles later.
 
@@ -54,7 +59,7 @@ doc.flipY();                         // DXF Y-up ↔ screen Y-down
 | **POINT** | ✅ | Loaded; not drawn by default |
 | **INSERT / BLOCK** | ✅ | Blocks collected; INSERT expanded (scale, rotation, arrays); **block entity layers preserved** |
 | **Deferred INSERT** | ✅ | INSERT before block definition — resolved after load |
-| **HATCH** | ✅ | **Boundary loops only** (lines, arcs, bulge polylines; no fill pattern) |
+| **HATCH** | ✅ | **Boundary edges** as typed entities (line / arc / ellipse / spline / bulge polyline); fill pattern ignored |
 | **SOLID / TRACE / 3DFACE** | ✅ | Closed polylines (≤4 corners) |
 | **Layers** | ✅ | LAYER table + entity layer attribute |
 | **Colors** | ✅ | ACI palette + 24-bit `color24` |
@@ -67,7 +72,7 @@ doc.flipY();                         // DXF Y-up ↔ screen Y-down
 |--------|----------------|
 | Line, arc, circle | Native DXF entities (from `arcInfo` when present) |
 | Ellipse, spline | Native DXF when metadata present |
-| Hatch / solid / trace | **LWPOLYLINE** (boundaries only) |
+| Hatch / solid / trace | Native types when metadata present; else **LWPOLYLINE** |
 | Other / fallback | **LWPOLYLINE** at export quality (`exportPath()`) |
 
 INSERT/BLOCK structure is **not** recreated on save — output is flat geometry.
@@ -82,7 +87,7 @@ Circles and arcs tessellate at **arc center in local coordinates** (avoids jitte
 | **ELLIPSE** (`ellipseInfo`) | Local tessellation at ellipse center (zoom-adaptive) |
 | **SPLINE** (`splineInfo`) | Local NURBS tessellation at spline centroid (zoom-adaptive) |
 | **Bulge** polylines (`ofPath` arc commands) | Each arc drawn locally; elliptical arcs when `radiusX ≠ radiusY` |
-| Chord-faceted polylines (many `lineTo`) | Drawn as stored — no silent circle fitting |
+| Chord-faceted polylines (many `lineTo`) | Drawn as stored — call `promoteCurves()` to recover arcs/circles |
 
 Pass **`DxfViewContext`** to `entity.draw()` so full circles only stroke the viewport-visible arc span at high zoom.
 
@@ -95,6 +100,7 @@ DxfCurvePromotionSettings settings;
 settings.promoteBulgeArcCircles = true;   // exact: arc commands spanning 360°
 settings.promoteBulgeArcs       = true;   // exact: single bulge arc
 settings.promoteFacetedCircles  = false;  // off by default — avoids hexagon → circle
+settings.promoteFacetedArcs     = false;  // off by default — open chord arc → ARC
 
 auto result = ofxDxf::promoteCurves(doc, settings);
 // result.circlesPromoted, result.arcsPromoted, result.entitiesExamined
@@ -105,9 +111,11 @@ auto result = ofxDxf::promoteCurves(doc, settings);
 | `promoteBulgeArcCircles` | `true` | Closed loop of exact arc commands → `CIRCLE` |
 | `promoteBulgeArcs` | `true` | moveTo + one arc (bulge) → `ARC` |
 | `promoteFacetedCircles` | **`false`** | Chord-fit closed polyline → `CIRCLE` (heuristic) |
-| `facetedCircleMinVertices` | `16` | Minimum facet count (hexagon = 6, never matches) |
+| `promoteFacetedArcs` | **`false`** | Chord-fit open polyline → `ARC` (heuristic) |
+| `facetedCircleMinVertices` | `16` | Minimum facet count for closed circle fit |
+| `facetedArcMinVertices` | `8` | Minimum facet count for open arc fit |
 | `facetedCircleMaxRelativeError` | `0.01` | Max radius fit error |
-| `facetedCircleMaxEdgeVariance` | `0.05` | Rejects uneven edge lengths |
+| `facetedCircleMaxEdgeVariance` | `0.05` | Rejects uneven edge lengths (circles only) |
 
 Promotion preserves **layer**, **color**, and other entity metadata. Entities that already have `arcInfo` are never changed.
 
@@ -139,7 +147,7 @@ If geometry is missing, check the console **`ofxDxf: Load summary`** line or `do
 
 | Method | Use |
 |--------|-----|
-| `entity.path` | Exact stored geometry |
+| `entity.path` | Exact `ofPath` when geometry allows (lines, arcs, bulge); empty for ellipse/spline |
 | `entity.arcInfo` | Native circle/arc parameters (export source of truth) |
 | `entity.exportPath()` | **Export / plot** — exact paths; `arcInfo` rebuilt into `ofPath` |
 | `entity.resolvedPath()` | **Display** — uses `ofGetStyle()` segment count |
@@ -153,7 +161,6 @@ Tessellation resolution is **not** stored on the document — it comes from rend
 
 | Item | Effort | Notes |
 |------|--------|-------|
-| **Open chord-faceted arc fitting** | medium | Optional promotion (like faceted circles) |
 | **Linetype on draw** | medium | Dashed layer styles |
 | **DIMENSION → lines/arcs** | ~1 day | Explode dimension primitives |
 | **TEXT outline / bbox** | ~1–2 days | Optional labels for reference |
