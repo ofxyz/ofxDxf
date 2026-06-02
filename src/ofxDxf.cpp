@@ -247,6 +247,74 @@ static ofPath pathFromEllipse(const DxfEllipseInfo& ei, int segs) {
     return path;
 }
 
+/// Populate `path` with cubic-bezier commands approximating the ellipse.
+/// Uses 1-4 bezier segments (one per π/2 of arc, max error ~0.027% per quadrant).
+/// The path is reset and initialized as a stroke path.
+static void buildEllipsePath(ofPath& path, const DxfEllipseInfo& ei) {
+    initStrokePath(path);
+
+    const float a = glm::length(ei.majorAxis);
+    const float b = a * ei.ratio;
+    if (a <= 0.f) return;
+
+    const float theta  = std::atan2(ei.majorAxis.y, ei.majorAxis.x);
+    const float cosT   = std::cos(theta);
+    const float sinT   = std::sin(theta);
+
+    double startParam = ei.startParam;
+    double endParam   = ei.endParam;
+    const bool ccw = endParam >= startParam;
+    double span = endParam - startParam;
+    if (ccw) {
+        while (span > TWO_PI + 1e-6) { endParam -= TWO_PI; span = endParam - startParam; }
+        while (span < 0)             { endParam += TWO_PI; span = endParam - startParam; }
+    } else {
+        while (span < -TWO_PI - 1e-6) { endParam += TWO_PI; span = endParam - startParam; }
+    }
+    const double absSpan = std::abs(span);
+    const bool full = absSpan > TWO_PI - 1e-4;
+
+    auto evalPt = [&](double t) -> glm::vec2 {
+        const float lx = a * std::cos(float(t));
+        const float ly = b * std::sin(float(t));
+        return glm::vec2(ei.center.x + lx * cosT - ly * sinT,
+                         ei.center.y + lx * sinT + ly * cosT);
+    };
+    auto evalTan = [&](double t) -> glm::vec2 {
+        const float lx = -a * std::sin(float(t));
+        const float ly =  b * std::cos(float(t));
+        return glm::vec2(lx * cosT - ly * sinT, lx * sinT + ly * cosT);
+    };
+
+    const int n = std::max(1, int(std::ceil(absSpan / (M_PI / 2.0))));
+    const glm::vec2 p0 = evalPt(startParam);
+    path.moveTo(p0.x, p0.y);
+
+    for (int i = 0; i < n; ++i) {
+        const double t1 = startParam + span * double(i) / double(n);
+        const double t2 = startParam + span * double(i + 1) / double(n);
+        const float  k  = float((4.0 / 3.0) * std::tan((t2 - t1) / 4.0));
+        const glm::vec2 q0  = evalPt(t1);
+        const glm::vec2 q3  = evalPt(t2);
+        const glm::vec2 cp1 = q0 + k * evalTan(t1);
+        const glm::vec2 cp2 = q3 - k * evalTan(t2);
+        path.bezierTo(cp1.x, cp1.y, cp2.x, cp2.y, q3.x, q3.y);
+    }
+    if (full) path.close();
+}
+
+/// Number of bezier segments in the ellipse bezierTo approximation for this span.
+static int ellipseBezierSegmentCount(const DxfEllipseInfo& ei) {
+    double span = std::abs(ei.endParam - ei.startParam);
+    while (span > TWO_PI + 1e-6) span -= TWO_PI;
+    return std::max(1, int(std::ceil(span / (M_PI / 2.0))));
+}
+
+/// Convert total desired linear segments for an ellipse into per-bezier curveResolution.
+static int curveResForEllipse(const DxfEllipseInfo& ei, int totalSegs) {
+    return std::max(4, totalSegs / ellipseBezierSegmentCount(ei));
+}
+
 static float ellipseParamSpanDegrees(const DxfEllipseInfo& ei) {
     const bool ccw = ei.endParam >= ei.startParam;
     double span = ei.endParam - ei.startParam;
@@ -264,6 +332,8 @@ static int resolveSegments(int segments);
 static int adaptiveSegmentCount(float radiusWorld, float viewZoom, float spanDegrees);
 static int displaySegmentsForSpline(const DxfSplineInfo& sp, int baseSegments,
                                     float viewZoom);
+static int exportSegmentCountForSpline(const DxfSplineInfo& sp);
+static void buildSplinePath(ofPath& path, const DxfSplineInfo& sp);
 
 static int displaySegmentsForEllipse(const DxfEllipseInfo& ei, int baseSegments,
                                      float viewZoom) {
@@ -276,40 +346,6 @@ static int displaySegmentsForEllipse(const DxfEllipseInfo& ei, int baseSegments,
 
 static void drawLocalArcOutlines(const DxfArcInfo& ai, float viewZoom);
 static void drawPathOutlines(const ofPath& path, int circleRes, int curveRes);
-
-static std::vector<ofPolyline> tessellateEllipseInfoOutline(const DxfEllipseInfo& ei,
-                                                            int segs) {
-    DxfEllipseInfo local = ei;
-    local.center = {0, 0};
-    const ofPath localPath = pathFromEllipse(local, segs);
-
-    std::vector<ofPolyline> out;
-    for (auto outline : localPath.getOutline()) {
-        for (auto& v : outline.getVertices()) {
-            v.x += ei.center.x;
-            v.y += ei.center.y;
-        }
-        if (outline.size() >= 2) out.push_back(std::move(outline));
-    }
-    return out;
-}
-
-static void drawLocalEllipseOutlines(const DxfEllipseInfo& ei, float viewZoom,
-                                     int baseSegments) {
-    const float majorLen = glm::length(ei.majorAxis);
-    if (majorLen <= 0.f) return;
-
-    const int segs = displaySegmentsForEllipse(ei, baseSegments, viewZoom);
-
-    ofPushMatrix();
-    ofTranslate(ei.center.x, ei.center.y);
-
-    DxfEllipseInfo local = ei;
-    local.center = {0, 0};
-    drawPathOutlines(pathFromEllipse(local, segs), segs, segs);
-
-    ofPopMatrix();
-}
 
 static void drawLocalEllipticalArcCommand(const ofPath::Command& cmd, float viewZoom) {
     const float rx = cmd.radiusX;
@@ -617,10 +653,16 @@ static ofPath pathFromArcInfo(const DxfArcInfo& ai, DxfEntity::Type type) {
     return p;
 }
 
-/// Rebuild `path` from exact ofPath commands when metadata allows (arc/circle).
-static void syncExactPath(DxfEntity& e) {
+/// Rebuild `path` from metadata so it is always populated with
+/// resolution-independent commands (arc for circles/arcs, bezierTo for
+/// ellipses, lineTo for splines).
+static void syncPath(DxfEntity& e) {
     if (e.arcInfo)
         e.path = pathFromArcInfo(*e.arcInfo, e.type);
+    else if (e.ellipseInfo)
+        buildEllipsePath(e.path, *e.ellipseInfo);
+    else if (e.splineInfo)
+        buildSplinePath(e.path, *e.splineInfo);
 }
 
 static std::optional<DxfArcInfo> tryPromoteArcFromOpenPolyline(
@@ -1012,32 +1054,6 @@ static int displaySegmentsForSpline(const DxfSplineInfo& sp, int baseSegments,
     return std::clamp(std::max(res, adaptive), 12, 8192);
 }
 
-static std::vector<ofPolyline> tessellateSplineInfoOutline(const DxfSplineInfo& sp,
-                                                           int segs) {
-    const glm::vec2 origin = splineLocalOrigin(sp);
-    const ofPath localPath = pathFromSpline(offsetSplineInfo(sp, origin), segs);
-
-    std::vector<ofPolyline> out;
-    for (auto outline : localPath.getOutline()) {
-        for (auto& v : outline.getVertices()) {
-            v.x += origin.x;
-            v.y += origin.y;
-        }
-        if (outline.size() >= 2) out.push_back(std::move(outline));
-    }
-    return out;
-}
-
-static void drawLocalSplineOutlines(const DxfSplineInfo& sp, float viewZoom,
-                                    int baseSegments) {
-    const glm::vec2 origin = splineLocalOrigin(sp);
-    const int segs = displaySegmentsForSpline(sp, baseSegments, viewZoom);
-
-    ofPushMatrix();
-    ofTranslate(origin.x, origin.y);
-    drawPathOutlines(pathFromSpline(offsetSplineInfo(sp, origin), segs), segs, segs);
-    ofPopMatrix();
-}
 
 static int exportSegmentCountForSpline(const DxfSplineInfo& sp) {
     constexpr float kMaxSegLen = 0.025f; // ~0.025 mm per segment
@@ -1070,14 +1086,18 @@ static int exportSegmentCountForEllipse(const DxfEllipseInfo& ei) {
     return std::clamp(int(std::ceil(perim * frac / kMaxSegLen)), kMin, kMax);
 }
 
-static ofPath entityDrawPath(const DxfEntity& e, int segments) {
-    const int res = resolveSegments(segments);
-    if (e.splineInfo) return pathFromSpline(*e.splineInfo, res);
-    if (e.ellipseInfo) return pathFromEllipse(*e.ellipseInfo, res);
+/// Populate `path` with lineTo commands tessellating the spline at export quality.
+static void buildSplinePath(ofPath& path, const DxfSplineInfo& sp) {
+    path = pathFromSpline(sp, exportSegmentCountForSpline(sp));
+}
 
-    ofPath p = e.arcInfo ? pathFromArcInfo(*e.arcInfo, e.type) : e.path;
+/// Return `path` with circleResolution and curveResolution set for display quality.
+static ofPath entityDrawPath(const DxfEntity& e, int segments) {
+    const int res      = resolveSegments(segments);
+    const int curveRes = e.ellipseInfo ? curveResForEllipse(*e.ellipseInfo, res) : res;
+    ofPath p = e.path;
     p.setCircleResolution(res);
-    p.setCurveResolution(res);
+    p.setCurveResolution(curveRes);
     return p;
 }
 
@@ -1224,7 +1244,7 @@ static DxfEntity transformEntityForInsert(const DxfEntity& src, const glm::vec2&
                 e.type = DxfEntity::Type::Ellipse;
                 e.arcInfo.reset();
                 e.ellipseInfo = std::move(*ei);
-                initStrokePath(e.path);
+                buildEllipsePath(e.path, *e.ellipseInfo);
             } else {
                 e.arcInfo.reset();
                 e.type = DxfEntity::Type::Polyline;
@@ -1320,7 +1340,6 @@ static std::optional<DxfEntity> hatchEdgeToEntity(const DL_HatchEdgeData& edge) 
     }
     case 2: {
         DxfEntity e;
-        initStrokePath(e.path);
         DxfArcInfo ai;
         ai.center     = glm::vec2(float(edge.cx), float(edge.cy));
         ai.radius     = float(edge.radius);
@@ -1329,13 +1348,12 @@ static std::optional<DxfEntity> hatchEdgeToEntity(const DL_HatchEdgeData& edge) 
         ai.isCCW      = edge.ccw;
         e.arcInfo     = ai;
         e.type = arcInfoIsFullCircle(ai) ? DxfEntity::Type::Circle : DxfEntity::Type::Arc;
-        syncExactPath(e);
+        syncPath(e);
         return e;
     }
     case 3: {
         DxfEntity e;
         e.type = DxfEntity::Type::Ellipse;
-        initStrokePath(e.path);
         DxfEllipseInfo ei;
         ei.center     = glm::vec2(float(edge.cx), float(edge.cy));
         ei.majorAxis  = glm::vec2(float(edge.mx), float(edge.my));
@@ -1343,13 +1361,13 @@ static std::optional<DxfEntity> hatchEdgeToEntity(const DL_HatchEdgeData& edge) 
         ei.startParam = edge.angle1;
         ei.endParam   = edge.angle2;
         e.ellipseInfo = ei;
+        syncPath(e);
         return e;
     }
     case 4: {
         if (edge.controlPoints.empty() && edge.fitPoints.empty()) return std::nullopt;
         DxfEntity e;
         e.type = DxfEntity::Type::Spline;
-        initStrokePath(e.path);
         DxfSplineInfo sp;
         sp.degree = int(edge.degree);
         sp.closed = edge.periodic;
@@ -1364,6 +1382,7 @@ static std::optional<DxfEntity> hatchEdgeToEntity(const DL_HatchEdgeData& edge) 
         }
         if (sp.controlPoints.empty() && sp.fitPoints.empty()) return std::nullopt;
         e.splineInfo = std::move(sp);
+        syncPath(e);
         return e;
     }
     default:
@@ -1390,22 +1409,7 @@ static ofRectangle boundsOfEntity(const DxfEntity& e) {
                 expandBounds(b, v.x, v.y, first);
     };
 
-    if (e.arcInfo) {
-        absorbPolylines(tessellateArcInfoOutline(*e.arcInfo, boundsSegmentCount()));
-    } else if (e.ellipseInfo) {
-        absorbPolylines(tessellateEllipseInfoOutline(
-            *e.ellipseInfo, displaySegmentsForEllipse(*e.ellipseInfo, -1, 1.f)));
-    } else if (e.splineInfo) {
-        absorbPolylines(tessellateSplineInfoOutline(
-            *e.splineInfo, displaySegmentsForSpline(*e.splineInfo, -1, 1.f)));
-    } else if (pathHasArcCommands(e.path)) {
-        absorbPolylines(tessellatePathWithLocalArcs(e.path, boundsSegmentCount()));
-    } else {
-        const ofPath drawPath = entityDrawPath(e, boundsSegmentCount());
-        for (const auto& outline : drawPath.getOutline())
-            for (const auto& v : outline.getVertices())
-                expandBounds(b, v.x, v.y, first);
-    }
+    absorbPolylines(e.getOutline(boundsSegmentCount()));
 
     if (e.type == DxfEntity::Type::Point && !e.path.getCommands().empty()) {
         const glm::vec2 p = e.path.getCommands()[0].to;
@@ -1429,10 +1433,20 @@ static void flipPathY(ofPath& path, float top) {
             cmd.to.y  = top - cmd.to.y;
             break;
         case ofPath::Command::arc:
-        case ofPath::Command::arcNegative:
+        case ofPath::Command::arcNegative: {
             cmd.to.y = top - cmd.to.y;
-            std::swap(cmd.angleBegin, cmd.angleEnd);
+            // Y-reflection maps θ → -θ ≡ (720-θ) mod 360, then swap start/end
+            // to maintain the same-span arc going the reflected direction.
+            const float ob = cmd.angleBegin;
+            const float oe = cmd.angleEnd;
+            cmd.angleBegin = std::fmod(720.f - oe, 360.f);
+            cmd.angleEnd   = std::fmod(720.f - ob, 360.f);
+            // Reflection reverses winding: arc ↔ arcNegative
+            cmd.type = (cmd.type == ofPath::Command::arc)
+                       ? ofPath::Command::arcNegative
+                       : ofPath::Command::arc;
             break;
+        }
         case ofPath::Command::close:
             break;
         }
@@ -1449,20 +1463,18 @@ std::vector<ofPolyline> DxfEntity::getOutline(int segments) const {
     const int res = resolveSegments(segments);
     if (arcInfo)
         return tessellateArcInfoOutline(*arcInfo, res);
-    if (ellipseInfo) {
-        return tessellateEllipseInfoOutline(*ellipseInfo,
-            displaySegmentsForEllipse(*ellipseInfo, segments, 1.f));
-    }
-    if (splineInfo)
-        return tessellateSplineInfoOutline(*splineInfo,
-            displaySegmentsForSpline(*splineInfo, segments, 1.f));
     if (pathHasArcCommands(path))
         return tessellatePathWithLocalArcs(path, res);
     return entityDrawPath(*this, res).getOutline();
 }
 
 ofPath DxfEntity::resolvedPath(int segments) const {
-    return entityDrawPath(*this, segments);
+    const int res      = resolveSegments(segments);
+    const int curveRes = ellipseInfo ? curveResForEllipse(*ellipseInfo, res) : res;
+    ofPath p = path;
+    p.setCircleResolution(res);
+    p.setCurveResolution(curveRes);
+    return p;
 }
 
 ofPath DxfEntity::exportPath(int segments) const {
@@ -1473,33 +1485,22 @@ void DxfEntity::draw(float viewZoom, int segments, const DxfViewContext* view) c
     if (type == Type::Point)
         return;
 
-    // Stored CIRCLE/ARC metadata, or native entities from the file.
-    if (arcInfo) {
-        if (arcInfoIsFullCircle(*arcInfo))
-            drawLocalCircleOutlines(*arcInfo, viewZoom, view);
-        else
-            drawLocalArcOutlines(*arcInfo, viewZoom);
+    // Full circles: viewport-culling optimization.
+    if (arcInfo && arcInfoIsFullCircle(*arcInfo)) {
+        drawLocalCircleOutlines(*arcInfo, viewZoom, view);
         return;
     }
 
-    if (ellipseInfo) {
-        drawLocalEllipseOutlines(*ellipseInfo, viewZoom, segments);
-        return;
-    }
-
-    if (splineInfo) {
-        drawLocalSplineOutlines(*splineInfo, viewZoom, segments);
-        return;
-    }
-
+    // Arc commands in path (arcs, circles, bulge-arcs): zoom-adaptive + localized draw.
     if (pathHasArcCommands(path)) {
         drawLocalPathOutlines(path, viewZoom);
         return;
     }
 
-    // Lines and polylines — no circular arcs to localize.
-    const int res = displayResolutionForEntity(*this, segments, viewZoom);
-    drawPathOutlines(entityDrawPath(*this, res), res, res);
+    // Bezier/line paths (ellipses, splines, polylines): resolution-controlled draw.
+    const int totalSegs = displayResolutionForEntity(*this, segments, viewZoom);
+    const int curveRes  = ellipseInfo ? curveResForEllipse(*ellipseInfo, totalSegs) : totalSegs;
+    drawPathOutlines(path, totalSegs, curveRes);
 }
 
 ofColor ofxDxf::aciToColor(int aci) { return aciToOf(aci); }
@@ -1555,14 +1556,13 @@ public:
         ai.isCCW      = true;
         e.arcInfo     = ai;
 
-        syncExactPath(e);
+        syncPath(e);
         pushEntity(std::move(e));
     }
 
     void addCircle(const DL_CircleData& d) override {
         DxfEntity e;
         e.type = DxfEntity::Type::Circle;
-        initStrokePath(e.path);
 
         DxfArcInfo ai;
         ai.center = glm::vec2(float(d.cx), float(d.cy));
@@ -1572,14 +1572,13 @@ public:
         ai.isCCW      = true;
         e.arcInfo     = ai;
 
-        syncExactPath(e);
+        syncPath(e);
         pushEntity(std::move(e));
     }
 
     void addEllipse(const DL_EllipseData& d) override {
         DxfEntity e;
         e.type = DxfEntity::Type::Ellipse;
-        initStrokePath(e.path);
 
         DxfEllipseInfo ei;
         ei.center     = glm::vec2(float(d.cx), float(d.cy));
@@ -1588,6 +1587,7 @@ public:
         ei.startParam = d.angle1;
         ei.endParam   = d.angle2;
         e.ellipseInfo = ei;
+        syncPath(e);
         pushEntity(std::move(e));
     }
 
@@ -1940,6 +1940,7 @@ private:
         sp.controlPoints = m_splineControlPts;
         sp.fitPoints     = m_splineFitPts;
         m_pendingSpline.splineInfo = sp;
+        syncPath(m_pendingSpline);
         pushEntity(std::move(m_pendingSpline));
     }
 };
@@ -1969,7 +1970,7 @@ std::vector<ofPath> DxfDocument::getAllPaths() const {
     std::vector<ofPath> out;
     for (auto& layer : layers)
         for (auto& e : layer.entities)
-            out.push_back(e.resolvedPath());
+            out.push_back(e.path);
     return out;
 }
 
@@ -1978,7 +1979,7 @@ std::vector<ofPath> DxfDocument::getPathsOnLayer(const std::string& name) const 
     for (auto& layer : layers)
         if (layer.name == name)
             for (auto& e : layer.entities)
-                out.push_back(e.resolvedPath());
+                out.push_back(e.path);
     return out;
 }
 
@@ -2036,6 +2037,33 @@ void DxfDocument::flipY() {
                 for (auto& p : e.splineInfo->controlPoints) p.y = top - p.y;
                 for (auto& p : e.splineInfo->fitPoints)     p.y = top - p.y;
             }
+        }
+    }
+
+    bool first = true;
+    ofRectangle b;
+    for (auto& layer : layers) {
+        for (auto& e : layer.entities) {
+            const ofRectangle eb = boundsOfEntity(e);
+            if (eb.width <= 0 && eb.height <= 0) continue;
+            if (first) { b = eb; first = false; }
+            else b.growToInclude(eb);
+        }
+    }
+    if (!first) bounds = b;
+}
+
+void DxfDocument::complementArcs() {
+    for (auto& layer : layers) {
+        for (auto& e : layer.entities) {
+            if (!e.arcInfo) continue;
+            auto& ai = e.arcInfo.value();
+            if (arcInfoIsFullCircle(ai)) continue;   // full circles are self-complementary
+            // Swap start/end: same circle, same direction, complementary span.
+            std::swap(ai.startAngle, ai.endAngle);
+            // Rebuild path from the updated metadata so stored angle adjustments
+            // stay consistent (avoids reasoning about the pre-adjusted cmd values).
+            syncPath(e);
         }
     }
 

@@ -193,8 +193,11 @@ void ofApp::drawViewportOverlay() {
 
     std::string info = m_loadedFilename.empty()
         ? "No file loaded"
-        : m_loadedFilename + "   zoom " + ofToString(m_zoom, 2)
-            + "x   scroll=zoom  LMB=pan  R=reset  F=fit";
+        : m_loadedFilename
+            + (m_docFlipped       ? "  [mirrored]"    : "")
+            + (m_arcsComplemented ? "  [arcs~]"        : "")
+            + "   zoom " + ofToString(m_zoom, 2)
+            + "x   scroll=zoom  LMB=pan  R=reset  F=fit  M=mirror  C=complement arcs";
     const ImVec2 textSize = ImGui::CalcTextSize(info.c_str());
     dl->AddText(font, fs,
                 ImVec2(sw + 8.f, ofGetHeight() - textSize.y - 8.f),
@@ -229,7 +232,7 @@ void ofApp::drawGrid() {
     const float startY = std::floor(top   / baseStep) * baseStep;
 
     constexpr int kMaxGridLines = 250;
-    ofSetLineWidth(std::max(0.5f, 1.f / m_zoom));
+    ofSetLineWidth(1.f);
 
     int count = 0;
     for (float x = startX; x <= right && count < kMaxGridLines; x += baseStep, ++count) {
@@ -316,7 +319,7 @@ void ofApp::drawFileSection() {
             auto& b = m_doc.bounds;
             ImGui::TextDisabled("%.1f x %.1f  (%s)",
                 b.width, b.height,
-                m_docFlipped ? "Y-flipped" : "Y-up");
+                m_docFlipped ? "Y-down" : "Y-up");
             ImGui::TextDisabled("%d layer%s  |  %d entities",
                 (int)m_doc.layers.size(),
                 m_doc.layers.size() == 1 ? "" : "s",
@@ -327,10 +330,24 @@ void ofApp::drawFileSection() {
 
         if (ImGui::Button("Fit View", { halfBtnW, 0 })) fitView();
         ImGui::SameLine();
-        if (ImGui::Button(m_docFlipped ? "Flip Y (on)" : "Flip Y (off)", { -1, 0 })) {
+        if (ImGui::Button(m_docFlipped ? "Mirror Y [on]" : "Mirror Y [off]", { -1, 0 })) {
             m_doc.flipY();
             m_docFlipped = !m_docFlipped;
         }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Reflect the document about its horizontal centre.\n"
+                              "Toggle to compare original vs mirrored geometry.");
+
+        if (ImGui::Button(m_arcsComplemented ? "Complement Arcs [on]" : "Complement Arcs [off]", { -1, 0 })) {
+            m_doc.complementArcs();
+            m_arcsComplemented = !m_arcsComplemented;
+            fitView();
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Replace every partial arc with the remaining arc of\n"
+                              "its circle. Short feather curves on large-radius circles\n"
+                              "become dominant sweeping arcs. Idempotent: toggle off\n"
+                              "to restore original arcs.  Shortcut: C");
 
         ImGui::Checkbox("Show grid", &m_showGrid);
     }
@@ -481,7 +498,8 @@ void ofApp::loadDxf(const std::string& path) {
     m_doc = ofxDxf::load(path);
     // DXF is Y-up; flip to screen/SVG Y-down immediately
     if (!m_doc.empty()) m_doc.flipY();
-    m_docFlipped     = true;
+    m_docFlipped      = true;
+    m_arcsComplemented = false;
     m_loadedFilename = ofFilePath::getFileName(path);
     m_exportResult   = false;
 
@@ -503,7 +521,8 @@ void ofApp::loadSvg(const std::string& path) {
     }
 
     m_doc = DxfDocument();
-    m_docFlipped = false;  // SVG is already Y-down
+    m_docFlipped       = false;  // SVG is already Y-down
+    m_arcsComplemented = false;
 
     // Walk all paths in the SVG; group by the nearest named parent <g> id (layer name).
     // ofxSvgPath is the base for PATH, RECTANGLE, ELLIPSE and CIRCLE — all have getPath().
@@ -733,6 +752,19 @@ void ofApp::keyPressed(int key) {
     }
     if (key == 'f' || key == 'F') fitView();
     if (key == 'g' || key == 'G') m_showGrid = !m_showGrid;
+    if (key == 'm' || key == 'M') {
+        if (!m_doc.empty()) {
+            m_doc.flipY();
+            m_docFlipped = !m_docFlipped;
+        }
+    }
+    if (key == 'c' || key == 'C') {
+        if (!m_doc.empty()) {
+            m_doc.complementArcs();
+            m_arcsComplemented = !m_arcsComplemented;
+            fitView();
+        }
+    }
 }
 
 void ofApp::mouseScrolled(ofMouseEventArgs& e) {

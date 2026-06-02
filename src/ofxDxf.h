@@ -52,10 +52,14 @@ struct DxfViewContext {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DxfEntity — one shape from a DXF file.
-//   Primary geometry lives in `path` (ofPath commands — arcs/circles stay exact).
-//   Optional metadata preserves types that need extra DXF fields on export.
-//   Tessellation happens only for display (getOutline / resolvedPath) or when
-//   exportPath must approximate splines/ellipses that have no exact ofPath yet.
+//   `path` is always populated with resolution-independent ofPath commands:
+//     - Lines / polylines / bulge-arcs  → moveTo / lineTo / arc commands
+//     - Circles / arcs                  → arc commands  (exact, re-tessellated via circleResolution)
+//     - Ellipses                        → bezierTo commands (~0.027% max error per quadrant,
+//                                         re-tessellated via curveResolution)
+//     - Splines                         → lineTo commands at export quality
+//   Optional metadata is the source of truth for DXF round-trip export and
+//   for zoom-adaptive display quality hints (arcInfo/ellipseInfo/splineInfo).
 // ─────────────────────────────────────────────────────────────────────────────
 struct DxfEntity {
     enum class Type {
@@ -72,10 +76,11 @@ struct DxfEntity {
     std::string layer = "0";
     ofColor     color {0, 0, 0};
 
-    /// Exact vector geometry (lines, arcs, circles, bulge arcs as arc commands).
-    /// Ellipse/spline curves keep `path` empty; tessellation uses metadata at draw time.
+    /// Always-populated path with resolution-independent commands.
+    /// Set circleResolution / curveResolution before draw() or getOutline() for quality control.
     ofPath      path;
 
+    /// DXF export hints — also used for zoom-adaptive display quality.
     std::optional<DxfArcInfo>     arcInfo;
     std::optional<DxfEllipseInfo> ellipseInfo;
     std::optional<DxfSplineInfo>  splineInfo;
@@ -122,7 +127,7 @@ struct DxfDocument {
     std::vector<const DxfEntity*> getAllEntities() const;
     std::vector<const DxfEntity*> getEntitiesOnLayer(const std::string& layerName) const;
 
-    /// Resolved path for every entity (tessellates ellipses/splines at default quality).
+    /// All entity paths (resolution-independent commands; set circleResolution/curveResolution before use).
     std::vector<ofPath> getAllPaths() const;
 
     std::vector<ofPath> getPathsOnLayer(const std::string& layerName) const;
@@ -135,6 +140,11 @@ struct DxfDocument {
     std::vector<std::string> getLayerNames() const;
 
     void flipY();
+
+    /// Replace every partial arc with its complement — the remaining arc of the
+    /// same circle. A 15° feather curve on a 775-radius circle becomes a 345°
+    /// sweep. Full circles (360°) are left unchanged. Idempotent when called twice.
+    void complementArcs();
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

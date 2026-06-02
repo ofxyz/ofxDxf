@@ -77,7 +77,8 @@ private:
     // ── Data ─────────────────────────────────────────────────────────────────
     DxfDocument  m_doc;
     std::string  m_loadedFilename;
-    bool         m_docFlipped = false;   // has flipY been applied to m_doc?
+    bool         m_docFlipped      = false;   // Mirror Y active (flipY applied to m_doc)
+    bool         m_arcsComplemented = false;  // Complement Arcs active
 
     std::map<std::string, LayerDisplay> m_layerDisplay;
 
